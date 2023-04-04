@@ -4,7 +4,7 @@
     
 ## What is pub?
 
-`pub` is an ActivityPub host indented for a single actor.
+`pub` is an ActivityPub host intended for a single actor.
 To interact with ActivityPub, `pub` implements the Mastodon[^tm] api for use with various apps. 
 
 `pub` is not intended to host an ActivityPub community, rather it is aimed at enabling someone who owns their own domain, and thus controls their identity, to participate in the fediverse. 
@@ -97,12 +97,12 @@ See the [examples](examples) directory for sample configurations for [nginx](exa
 - [Requests][requests]
 
 
-## Contributions
+## Contribution policy
 
-`pub` is open source, but not open for contributions _just yet_.
-That may change in the future, but at the moment please do not send pull requests.
+`pub` is currently open to code contributions for bug fixes _only_.
+This may change in the future, but at the moment please do not send pull requests with new features.
 
-In the meantime, if you have a feature request, or a bug report, please open an issue.
+If you have a feature request, or a bug report, please open an [issue](https://github.com/davecheney/pub/issues/new).
 If you're _really_ adventurous, you can contact me via [`@dfc@cheney.net`](acct:dfc@cheney.net).
 
 Thank you in advance for your understanding.
