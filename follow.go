@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 
-	"github.com/davecheney/pub/internal/activitypub"
-	"github.com/davecheney/pub/internal/models"
+	"github.com/davecheney/pub/activitypub"
+	"github.com/davecheney/pub/models"
 	"gorm.io/gorm"
 )
 
@@ -24,10 +24,5 @@ func (f *FollowCmd) Run(ctx *Context) error {
 		return err
 	}
 
-	client, err := activitypub.NewClient(context.Background(), &account)
-	if err != nil {
-		return err
-	}
-
-	return client.Follow(account.Actor.URI, f.Object)
+	return activitypub.Follow(context.Background(), &account, &models.Actor{URI: f.Object})
 }

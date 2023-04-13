@@ -4,9 +4,9 @@ import (
 	"net/http"
 
 	"github.com/davecheney/pub/internal/httpx"
-	"github.com/davecheney/pub/internal/models"
 	"github.com/davecheney/pub/internal/snowflake"
 	"github.com/davecheney/pub/internal/to"
+	"github.com/davecheney/pub/models"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
 )
@@ -16,20 +16,18 @@ func RelationshipsShow(env *Env, w http.ResponseWriter, req *http.Request) error
 	if err != nil {
 		return err
 	}
-	targets := req.URL.Query()["id"]
-	targets = append(targets, req.URL.Query()["id[]"]...)
+	var params struct {
+		ID  snowflake.ID   `schema:"id"`
+		IDs []snowflake.ID `schema:"id[]"`
+	}
+	if err := httpx.Params(req, &params); err != nil {
+		return err
+	}
 	serialise := Serialiser{req: req}
 	var resp []any
-	for _, target := range targets {
-		tid, err := snowflake.Parse(target)
-		if err != nil {
-			return httpx.Error(http.StatusBadRequest, err)
-		}
+	for _, tid := range append([]snowflake.ID{params.ID}, params.IDs...) {
 		var rel models.Relationship
-		if err := env.DB.Preload("Target").FirstOrCreate(&rel, models.Relationship{ActorID: user.Actor.ID, TargetID: tid}).Error; err != nil {
-			if err == gorm.ErrRecordNotFound {
-				return httpx.Error(http.StatusNotFound, err)
-			}
+		if err := env.DB.Preload("Target").FirstOrInit(&rel, models.Relationship{ActorID: user.Actor.ID, TargetID: tid}).Error; err != nil {
 			return err
 		}
 		resp = append(resp, serialise.Relationship(&rel))

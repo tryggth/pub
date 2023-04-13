@@ -3,13 +3,11 @@ package models
 import (
 	"errors"
 	"fmt"
-	"reflect"
 	"time"
-	"unsafe"
 
 	"github.com/davecheney/pub/internal/snowflake"
-	"github.com/davecheney/pub/internal/streaming"
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
 // A Status is a single message posted by a user. It may be a reply to another
@@ -21,7 +19,7 @@ type Status struct {
 	ActorID          snowflake.ID
 	Actor            *Actor `gorm:"constraint:OnDelete:CASCADE;<-:false;"` // don't update actor on status update
 	ConversationID   uint32
-	Conversation     *Conversation `gorm:"constraint:OnDelete:CASCADE;<-:false;"`
+	Conversation     *Conversation `gorm:"constraint:OnDelete:CASCADE;"`
 	InReplyToID      *snowflake.ID
 	InReplyToActorID *snowflake.ID
 	Sensitive        bool
@@ -34,8 +32,8 @@ type Status struct {
 	ReblogsCount     int        `gorm:"not null;default:0"`
 	FavouritesCount  int        `gorm:"not null;default:0"`
 	ReblogID         *snowflake.ID
-	Reblog           *Status             `gorm:"<-:false;"` // don't update reblog on status update
-	Reaction         *Reaction           `gorm:"<-:false;"` // don't update reaction on status update
+	Reblog           *Status             `gorm:"constraint:OnDelete:CASCADE;<-:false;"` // don't update reblog on status update
+	Reaction         *Reaction           `gorm:"constraint:OnDelete:CASCADE;<-:false;"` // don't update reaction on status update
 	Attachments      []*StatusAttachment `gorm:"constraint:OnDelete:CASCADE;"`
 	Mentions         []StatusMention     `gorm:"constraint:OnDelete:CASCADE;"`
 	Tags             []StatusTag         `gorm:"constraint:OnDelete:CASCADE;"`
@@ -47,7 +45,6 @@ func (st *Status) AfterCreate(tx *gorm.DB) error {
 		st.updateStatusCount,
 		st.updateRepliesCount,
 		st.updateReblogsCount,
-		st.sendUpdateEvent,
 	)
 }
 
@@ -86,46 +83,34 @@ func (st *Status) updateStatusCount(tx *gorm.DB) error {
 	statusesCount := tx.Select("COUNT(id)").Where("actor_id = ?", st.ActorID).Table("statuses")
 	createdAt := st.ID.ToTime()
 	actor := &Actor{ID: st.ActorID}
+	//TODO(dfc) last_status_at should only be updated if the status is newer than the current value.
 	return tx.Model(actor).UpdateColumns(map[string]interface{}{
 		"statuses_count": statusesCount,
 		"last_status_at": createdAt,
 	}).Error
 }
 
-// sendUpdateEvent sends an update event to the streaming mux.
-func (st *Status) sendUpdateEvent(tx *gorm.DB) error {
-	mux, ok := tx.Statement.Context.Value("mux").(*streaming.Mux)
-	if !ok {
-		printContextInternals(tx.Statement.Context, false)
-		return errors.New("no mux in context")
-	}
-	return mux.Publish("update", st)
+// A Conversation is a collection of related statuses. It is a way to group
+// together statuses that are replies to each other, or that are part of the
+// same thread of conversation. Conversations are not necessarily public, and
+// may be limited to a set of participants.
+type Conversation struct {
+	ID         uint32 `gorm:"primarykey"`
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+	Visibility Visibility `gorm:"not null;check <> ''"`
 }
 
-func printContextInternals(ctx interface{}, inner bool) {
-	contextValues := reflect.ValueOf(ctx).Elem()
-	contextKeys := reflect.TypeOf(ctx).Elem()
+type Visibility string
 
-	if !inner {
-		fmt.Printf("\nFields for %s.%s\n", contextKeys.PkgPath(), contextKeys.Name())
-	}
-
-	if contextKeys.Kind() == reflect.Struct {
-		for i := 0; i < contextValues.NumField(); i++ {
-			reflectValue := contextValues.Field(i)
-			reflectValue = reflect.NewAt(reflectValue.Type(), unsafe.Pointer(reflectValue.UnsafeAddr())).Elem()
-
-			reflectField := contextKeys.Field(i)
-
-			if reflectField.Name == "Context" {
-				printContextInternals(reflectValue.Interface(), true)
-			} else {
-				fmt.Printf("field name: %+v\n", reflectField.Name)
-				fmt.Printf("value: %+v\n", reflectValue.Interface())
-			}
-		}
-	} else {
-		fmt.Printf("context is empty (int)\n")
+func (Visibility) GormDBDataType(db *gorm.DB, field *schema.Field) string {
+	switch db.Dialector.Name() {
+	case "mysql", "postgres":
+		return "enum('public', 'unlisted', 'private', 'direct', 'limited')"
+	case "sqlite":
+		return "TEXT"
+	default:
+		return ""
 	}
 }
 
@@ -203,7 +188,7 @@ func (s *Statuses) FindByURI(uri string) (*Status, error) {
 	}
 	// use find to avoid the not found error on empty result
 	var status []Status
-	query := s.db.Joins("Actor").Scopes(PreloadStatus)
+	query := s.db.Joins("Actor").Preload("Conversation").Scopes(PreloadStatus)
 	if err := query.Where(&Status{URI: uri}).Find(&status).Error; err != nil {
 		return nil, err
 	}

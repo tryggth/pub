@@ -20,3 +20,21 @@ func Filter[T any](s []T, f func(T) bool) []T {
 	}
 	return r
 }
+
+// Equal returns true if all elements are equal.
+func Equal[T comparable](first, second T, rest ...T) bool {
+	if first != second {
+		return false
+	}
+	if len(rest) > 0 {
+		return Equal(second, rest[0], rest[1:]...)
+	}
+	return true
+}
+
+// Reverse reverses the order of the elements in the slice.
+func Reverse[T any](a []T) {
+	for i, j := 0, len(a)-1; i < j; i, j = i+1, j-1 {
+		a[i], a[j] = a[j], a[i]
+	}
+}

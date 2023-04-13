@@ -6,9 +6,8 @@ import (
 	"time"
 
 	"github.com/davecheney/pub/internal/algorithms"
-	"github.com/davecheney/pub/internal/models"
 	"github.com/davecheney/pub/internal/snowflake"
-	"github.com/davecheney/pub/media"
+	"github.com/davecheney/pub/models"
 )
 
 // Seraliser contains methods to seralise various Mastodon REST API
@@ -76,10 +75,10 @@ func (s *Serialiser) Account(a *models.Actor) *Account {
 		CreatedAt:      a.ID.ToTime().Round(time.Hour).Format("2006-01-02T00:00:00.000Z"),
 		Note:           a.Note,
 		URL:            fmt.Sprintf("https://%s/@%s", a.Domain, a.Name),
-		Avatar:         media.ProxyAvatarURL(a),
-		AvatarStatic:   media.ProxyAvatarURL(a),
-		Header:         media.ProxyHeaderURL(a),
-		HeaderStatic:   media.ProxyHeaderURL(a),
+		Avatar:         stringOrDefault(a.Avatar, s.urlFor("/avatar.jpg")),
+		AvatarStatic:   stringOrDefault(a.Avatar, s.urlFor("/avatar.jpg")),
+		Header:         stringOrDefault(a.Header, s.urlFor("/header.jpg")),
+		HeaderStatic:   stringOrDefault(a.Header, s.urlFor("/header.jpg")),
 		FollowersCount: a.FollowersCount,
 		FollowingCount: a.FollowingCount,
 		StatusesCount:  a.StatusesCount,
@@ -153,7 +152,7 @@ type Relationship struct {
 	Requested           bool         `json:"requested"`
 	DomainBlocking      bool         `json:"domain_blocking"`
 	Endorsed            bool         `json:"endorsed"`
-	Note                string       `json:"note"`
+	Note                string       `json:"note,omitempty"`
 }
 
 func (s *Serialiser) Relationship(rel *models.Relationship) *Relationship {
@@ -171,7 +170,7 @@ func (s *Serialiser) Relationship(rel *models.Relationship) *Relationship {
 		DomainBlocking:      false,
 		Endorsed:            false,
 		Note: func() string {
-			// FirstOrCreate won't preload the Target
+			// FirstOrInit won't preload the Target
 			// so it will be zero. :(
 			if rel.Target == nil {
 				return ""
@@ -201,9 +200,10 @@ type Status struct {
 	Favourited         bool               `json:"favourited"`
 	Reblogged          bool               `json:"reblogged"`
 	Muted              bool               `json:"muted"`
+	Pinned             bool               `json:"pinned"`
 	Bookmarked         bool               `json:"bookmarked"`
 	Content            string             `json:"content"`
-	Filtered           []any              `json:"filtered"`
+	Filtered           []any              `json:"filtered,omitempty"`
 	Reblog             *Status            `json:"reblog"`
 	Application        any                `json:"application,omitempty"`
 	Account            *Account           `json:"account"`
@@ -341,7 +341,7 @@ type MediaAttachment struct {
 type Meta struct {
 	Original      *MetaFormat `json:"original,omitempty"`
 	Small         *MetaFormat `json:"small,omitempty"`
-	Focus         MetaFocus   `json:"focus,omitempty"`
+	Focus         *MetaFocus  `json:"focus,omitempty"`
 	Length        string      `json:"length,omitempty"`
 	Duration      float64     `json:"duration,omitzero"`
 	FPS           int         `json:"fps,omitzero"`
@@ -367,48 +367,6 @@ type MetaFormat struct {
 	FrameRate string  `json:"frame_rate,omitempty"`
 	Duration  float64 `json:"duration,omitzero"`
 	Bitrate   string  `json:"bitrate,omitempty"`
-}
-
-func attachmentType(att *models.Attachment) string {
-	switch att.MediaType {
-	case "image/jpeg":
-		return "image"
-	case "image/png":
-		return "image"
-	case "image/gif":
-		return "image"
-	case "video/mp4":
-		return "video"
-	case "video/webm":
-		return "video"
-	case "audio/mpeg":
-		return "audio"
-	case "audio/ogg":
-		return "audio"
-	default:
-		return "unknown"
-	}
-}
-
-func extension(att *models.Attachment) string {
-	switch att.MediaType {
-	case "image/jpeg":
-		return "jpg"
-	case "image/png":
-		return "png"
-	case "image/gif":
-		return "gif"
-	case "video/mp4":
-		return "mp4"
-	case "video/webm":
-		return "webm"
-	case "audio/mpeg":
-		return "mp3"
-	case "audio/ogg":
-		return "ogg"
-	default:
-		return "jpg" // todo YOLO
-	}
 }
 
 func (s *Serialiser) InstanceV1(i *models.Instance) map[string]any {
@@ -662,10 +620,11 @@ type Poll struct {
 	Expired     bool         `json:"expired"`
 	Multiple    bool         `json:"multiple"`
 	VotesCount  int          `json:"votes_count"`
-	VotersCount any          `json:"voters_count"`
+	VotersCount *int         `json:"voters_count"`
 	Voted       bool         `json:"voted"`
+	OwnVotes    []int        `json:"own_votes"`
 	Options     []PollOption `json:"options"`
-	Emojies     []any        `json:"emojies"`
+	Emojis      []any        `json:"emojis"`
 }
 
 type PollOption struct {
@@ -677,14 +636,13 @@ func (s *Serialiser) Poll(p *models.StatusPoll) *Poll {
 	if p == nil {
 		return nil
 	}
-	return &Poll{
-		ID:          p.StatusID,
-		ExpiresAt:   p.ExpiresAt.Format("2006-01-02T15:04:05.006Z"),
-		Expired:     p.ExpiresAt.After(time.Now()),
-		Multiple:    p.Multiple,
-		VotesCount:  p.VotesCount,
-		VotersCount: nil,
-		Voted:       false,
+	poll := &Poll{
+		ID:         p.StatusID,
+		ExpiresAt:  p.ExpiresAt.Format("2006-01-02T15:04:05.006Z"),
+		Expired:    p.ExpiresAt.Before(time.Now()),
+		Multiple:   p.Multiple,
+		VotesCount: p.VotesCount,
+		Voted:      false,
 		Options: algorithms.Map(
 			p.Options,
 			func(option models.StatusPollOption) PollOption {
@@ -695,6 +653,7 @@ func (s *Serialiser) Poll(p *models.StatusPoll) *Poll {
 			},
 		),
 	}
+	return poll
 }
 
 // https://docs.joinmastodon.org/entities/StatusEdit/
@@ -706,7 +665,7 @@ type StatusEdit struct {
 	Account          *Account           `json:"account"`
 	Poll             *Poll              `json:"poll"`
 	MediaAttachments []*MediaAttachment `json:"media_attachments"`
-	Emojies          []any              `json:"emojies"`
+	Emojis           []any              `json:"emojis"`
 }
 
 func (s *Serialiser) StatusEdit(st *models.Status) *StatusEdit {
@@ -724,7 +683,6 @@ func (s *Serialiser) StatusEdit(st *models.Status) *StatusEdit {
 		Account:          s.Account(st.Actor),
 		Poll:             s.Poll(st.Poll),
 		MediaAttachments: s.MediaAttachments(st.Attachments),
-		Emojies:          nil,
 	}
 }
 
@@ -740,79 +698,90 @@ func (s *Serialiser) MediaAttachments(attachments []*models.StatusAttachment) []
 			func(sa *models.StatusAttachment) *models.Attachment {
 				return &sa.Attachment
 			},
-		), func(att *models.Attachment) *MediaAttachment {
-			at := &MediaAttachment{
-				ID:         att.ID,
-				Type:       attachmentType(att),
-				URL:        s.mediaOriginalURL(att),
-				PreviewURL: s.mediaPreviewURL(att),
-				RemoteURL:  att.URL,
-				Meta: Meta{
-					Focus: MetaFocus{
-						X: 0.0, // always centered
-						Y: 0.0,
-					},
-					Original: s.originalMetaFormat(att),
-					Small:    s.smallMetaFormat(att),
-				},
-				Description: att.Name,
-				Blurhash:    att.Blurhash,
-			}
-			return at
-		},
+		),
+		s.mediaAttachment,
 	)
 }
 
-func (s *Serialiser) originalMetaFormat(att *models.Attachment) *MetaFormat {
-	f := &MetaFormat{
+func (s *Serialiser) mediaAttachment(att *models.Attachment) *MediaAttachment {
+	return &MediaAttachment{
+		ID:         att.ID,
+		Type:       att.ToType(),
+		URL:        s.mediaOriginalURL(att),
+		PreviewURL: s.mediaPreviewURL(att),
+		RemoteURL:  att.URL,
+		Meta: Meta{
+			Focus:    focus(att),
+			Original: originalMetaFormat(att),
+			Small:    smallMetaFormat(att),
+		},
+		Description: att.Name,
+		Blurhash:    att.Blurhash,
+	}
+}
+
+func focus(att *models.Attachment) *MetaFocus {
+	if att.FocalPoint.X == 0 && att.FocalPoint.Y == 0 {
+		return nil
+	}
+	return &MetaFocus{
+		X: att.FocalPoint.X,
+		Y: att.FocalPoint.Y,
+	}
+}
+
+func originalMetaFormat(att *models.Attachment) *MetaFormat {
+	if att.Width == 0 || att.Height == 0 {
+		return nil
+	}
+	return &MetaFormat{
 		Width:  att.Width,
 		Height: att.Height,
 		Size:   fmt.Sprintf("%dx%d", att.Width, att.Height),
+		Aspect: float64(att.Width) / float64(att.Height),
 	}
-	if att.Width > 0 && att.Height > 0 {
-		f.Aspect = float64(att.Width) / float64(att.Height)
-	}
-	return f
 }
 
-func (s *Serialiser) smallMetaFormat(att *models.Attachment) *MetaFormat {
+func smallMetaFormat(att *models.Attachment) *MetaFormat {
 	if att.Width < PREVIEW_MAX_WIDTH && att.Height < PREVIEW_MAX_HEIGHT {
-		// no preview needed
-		return s.originalMetaFormat(att)
+		return originalMetaFormat(att)
 	}
 	switch att.MediaType {
-	case "image/jpeg", "image/png", "image/gif":
+	case "image/jpeg", "image/gif", "image/png", "image/webp":
 		h := att.Height
 		w := att.Width
 
 		if w > h {
-			h = int(float64(h) * (PREVIEW_MAX_WIDTH / float64(w)))
-			w = 560
+			h = h * PREVIEW_MAX_WIDTH / w
+			if h < 1 {
+				h = 1
+			}
+			w = PREVIEW_MAX_WIDTH
 		} else {
-			w = int(float64(w) * (PREVIEW_MAX_HEIGHT / float64(h)))
-			h = 415
+			w = w * PREVIEW_MAX_HEIGHT / h
+			if w < 1 {
+				w = 1
+			}
+			h = PREVIEW_MAX_HEIGHT
 		}
 
-		f := &MetaFormat{
+		return &MetaFormat{
 			Width:  w,
 			Height: h,
 			Size:   fmt.Sprintf("%dx%d", w, h),
+			Aspect: float64(att.Width) / float64(att.Height),
 		}
-		if att.Width > 0 && att.Height > 0 {
-			f.Aspect = float64(att.Width) / float64(att.Height)
-		}
-		return f
 	default:
-		// no preview needed
+		// no preview available
 		return nil
 	}
 }
 
 func (s *Serialiser) mediaOriginalURL(att *models.Attachment) string {
 	switch att.MediaType {
-	case "image/jpeg", "image/png", "image/gif":
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
 		// call through /media proxy to cache
-		return s.urlFor(fmt.Sprintf("/media/original/%d.%s", att.ID, extension(att)))
+		return s.urlFor(fmt.Sprintf("/media/original/%d.%s", att.ID, att.Extension()))
 	default:
 		// otherwise return the remote URL
 		return att.URL
@@ -820,14 +789,18 @@ func (s *Serialiser) mediaOriginalURL(att *models.Attachment) string {
 }
 
 func (s *Serialiser) mediaPreviewURL(att *models.Attachment) string {
-	if att.Width < PREVIEW_MAX_WIDTH || att.Height < PREVIEW_MAX_HEIGHT {
-		// no preview needed
-		return ""
+	if att.Width < PREVIEW_MAX_WIDTH && att.Height < PREVIEW_MAX_HEIGHT {
+		return s.mediaOriginalURL(att)
 	}
+	ext := att.Extension()
 	switch att.MediaType {
-	case "image/jpeg", "image/png", "image/gif":
+	case "image/png", "image/webp":
+		// request a JPEG preview
+		ext = "jpg"
+		fallthrough
+	case "image/jpeg", "image/gif":
 		// call through /media proxy to cache
-		return s.urlFor(fmt.Sprintf("/media/preview/%d.%s", att.ID, extension(att)))
+		return s.urlFor(fmt.Sprintf("/media/preview/%d.%s", att.ID, ext))
 	default:
 		// no preview available
 		return ""

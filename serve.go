@@ -12,14 +12,15 @@ import (
 	"time"
 
 	"github.com/davecheney/pub/activitypub"
-	"github.com/davecheney/pub/internal/group"
 	"github.com/davecheney/pub/internal/httpx"
-	"github.com/davecheney/pub/internal/models"
 	"github.com/davecheney/pub/internal/streaming"
 	"github.com/davecheney/pub/mastodon"
 	"github.com/davecheney/pub/media"
+	"github.com/davecheney/pub/models"
 	"github.com/davecheney/pub/oauth"
 	"github.com/davecheney/pub/wellknown"
+	"github.com/davecheney/pub/workers"
+	"github.com/pkg/group"
 	"gorm.io/gorm"
 
 	"github.com/go-chi/chi/v5"
@@ -53,7 +54,7 @@ func (s *ServeCmd) Run(ctx *Context) error {
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
-			ctx = context.WithValue(ctx, "mux", &mux)
+			ctx = context.WithValue(ctx, streaming.MuxContextKey, &mux)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	})
@@ -114,6 +115,7 @@ func (s *ServeCmd) Run(ctx *Context) error {
 			r.Get("/mutes", httpx.HandlerFunc(envFn, mastodon.MutesIndex))
 			r.Get("/notifications", httpx.HandlerFunc(envFn, mastodon.NotificationsIndex))
 			r.Get("/preferences", httpx.HandlerFunc(envFn, mastodon.PreferencesShow))
+			r.Post("/push/subscription", httpx.HandlerFunc(envFn, mastodon.PushSubscriptionCreate))
 			r.Post("/statuses", httpx.HandlerFunc(envFn, mastodon.StatusesCreate))
 			r.Get("/statuses/{id}/context", httpx.HandlerFunc(envFn, mastodon.StatusesContextsShow))
 			r.Get("/statuses/{id}/history", httpx.HandlerFunc(envFn, mastodon.StatusesHistoryShow))
@@ -128,10 +130,9 @@ func (s *ServeCmd) Run(ctx *Context) error {
 			r.Get("/statuses/{id}", httpx.HandlerFunc(envFn, mastodon.StatusesShow))
 			r.Delete("/statuses/{id}", httpx.HandlerFunc(envFn, mastodon.StatusesDestroy))
 
-			r.Route("/streaming", func(r chi.Router) {
-				r.Get("/health", httpx.HandlerFunc(envFn, mastodon.StreamingHealth))
-				r.Get("/public", httpx.HandlerFunc(envFn, mastodon.StreamingPublic))
-			})
+			r.Get("/streaming", httpx.HandlerFunc(envFn, mastodon.StreamingWebsocket))
+			r.Get("/streaming/health", httpx.HandlerFunc(envFn, mastodon.StreamingHealth))
+			r.Get("/streaming/public", httpx.HandlerFunc(envFn, mastodon.StreamingPublic))
 
 			r.Route("/timelines", func(r chi.Router) {
 				r.Get("/home", httpx.HandlerFunc(envFn, mastodon.TimelinesHome))
@@ -153,7 +154,6 @@ func (s *ServeCmd) Run(ctx *Context) error {
 			Mux: &mux,
 		}
 	}
-	r.Post("/inbox", httpx.HandlerFunc(envFn, activitypub.InboxCreate))
 
 	r.Route("/oauth", func(r chi.Router) {
 		r.Get("/authorize", httpx.HandlerFunc(envFn, oauth.AuthorizeNew))
@@ -162,9 +162,11 @@ func (s *ServeCmd) Run(ctx *Context) error {
 		r.Post("/revoke", httpx.HandlerFunc(envFn, oauth.TokenDestroy))
 	})
 
+	inbox := activitypub.NewInbox(db)
+	r.Post("/inbox", httpx.HandlerFunc(envFn, inbox.Create))
 	r.Route("/u/{name}", func(r chi.Router) {
 		r.Get("/", httpx.HandlerFunc(envFn, activitypub.UsersShow))
-		r.Post("/inbox", httpx.HandlerFunc(envFn, activitypub.InboxCreate))
+		r.Post("/inbox", httpx.HandlerFunc(envFn, inbox.Create))
 		r.Get("/outbox", httpx.HandlerFunc(envFn, activitypub.Outbox))
 		r.Get("/followers", httpx.HandlerFunc(envFn, activitypub.Followers))
 		r.Get("/following", httpx.HandlerFunc(envFn, activitypub.Following))
@@ -186,8 +188,8 @@ func (s *ServeCmd) Run(ctx *Context) error {
 
 	r.Get("/media/avatar/{hash}/{id}", httpx.HandlerFunc(modelEnvFn, media.Avatar))
 	r.Get("/media/header/{hash}/{id}", httpx.HandlerFunc(modelEnvFn, media.Header))
-	r.Get("/media/original/{id}.{ext}", httpx.HandlerFunc(modelEnvFn, media.Original))
-	r.Get("/media/preview/{id}.{ext}", httpx.HandlerFunc(modelEnvFn, media.Preview))
+	r.Get("/media/original/{id}.{ext:[a-z]+}", httpx.HandlerFunc(modelEnvFn, media.Original))
+	r.Get("/media/preview/{id}.{ext:[a-z]+}", httpx.HandlerFunc(modelEnvFn, media.Preview))
 
 	if s.DebugPrintRoutes {
 		walkFunc := func(method string, route string, handler http.Handler, middlewares ...func(http.Handler) http.Handler) error {
@@ -203,8 +205,9 @@ func (s *ServeCmd) Run(ctx *Context) error {
 
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	g := group.New(signalCtx)
-	g.AddContext(func(ctx context.Context) error {
+
+	g := group.New(context.WithValue(signalCtx, streaming.MuxContextKey, &mux))
+	g.Add(func(ctx context.Context) error {
 		fmt.Println("http.ListenAndServe", s.Addr, "started")
 		defer fmt.Println("http.ListenAndServe", s.Addr, "stopped")
 		svr := &http.Server{
@@ -219,26 +222,18 @@ func (s *ServeCmd) Run(ctx *Context) error {
 		}()
 		return svr.ListenAndServe()
 	})
-	g.Add(activitypub.NewRelationshipRequestProcessor(db).Run)
-	g.Add(activitypub.NewReactionRequestProcessor(db).Run)
 
-	return g.Wait()
-}
+	g.Add(workers.NewRelationshipRequestProcessor(db))
+	g.Add(workers.NewReactionRequestProcessor(db))
+	g.Add(workers.NewStatusAttachmentRequestProcessor(db))
 
-func configureDB(db *gorm.DB) error {
-	sqlDB, err := db.DB()
-	if err != nil {
+	// ActorRefreshProcessor needs an admin account to sign the activitypub requests.
+	// Pick _an_ admin account, it doesn't matter which one.
+	var admin models.Account
+	if err := db.Joins("Actor", "name = ? and type = ?", "admin", "LocalService").Take(&admin).Error; err != nil {
 		return err
 	}
+	g.Add(workers.NewActorRefreshProcessor(db, &admin))
 
-	// SetMaxIdleConns sets the maximum number of connections in the idle connection pool.
-	sqlDB.SetMaxIdleConns(10)
-
-	// SetMaxOpenConns sets the maximum number of open connections to the database.
-	sqlDB.SetMaxOpenConns(100)
-
-	// SetConnMaxLifetime sets the maximum amount of time a connection may be reused.
-	sqlDB.SetConnMaxLifetime(time.Hour)
-
-	return nil
+	return g.Wait()
 }

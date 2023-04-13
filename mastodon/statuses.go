@@ -4,17 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httputil"
-	"strings"
 	"time"
 
 	"github.com/davecheney/pub/internal/algorithms"
 	"github.com/davecheney/pub/internal/httpx"
-	"github.com/davecheney/pub/internal/models"
 	"github.com/davecheney/pub/internal/snowflake"
 	"github.com/davecheney/pub/internal/to"
+	"github.com/davecheney/pub/models"
 	"github.com/go-chi/chi/v5"
-	"github.com/go-json-experiment/json"
 	"gorm.io/gorm"
 )
 
@@ -25,74 +22,38 @@ func StatusesCreate(env *Env, w http.ResponseWriter, r *http.Request) error {
 	}
 
 	var toot struct {
-		Status      string        `json:"status"`
-		InReplyToID *snowflake.ID `json:"in_reply_to_id,string"`
-		Sensitive   bool          `json:"sensitive"`
-		SpoilerText string        `json:"spoiler_text"`
-		Visibility  string        `json:"visibility"`
-		Language    string        `json:"language"`
-		ScheduledAt *time.Time    `json:"scheduled_at,omitempty"`
+		Status      string        `json:"status" schema:"status"`
+		InReplyToID *snowflake.ID `json:"in_reply_to_id,string" schema:"in_reply_to_id"`
+		Sensitive   bool          `json:"sensitive" schema:"sensitive"`
+		SpoilerText string        `json:"spoiler_text" schema:"spoiler_text"`
+		Visibility  string        `json:"visibility" schema:"visibility"`
+		Language    string        `json:"language" schema:"language"`
+		ScheduledAt *time.Time    `json:"scheduled_at,omitempty" schema:"scheduled_at"`
 	}
-	switch strings.Split(r.Header.Get("Content-Type"), ";")[0] {
-	case "multipart/form-data":
-		toot.Status = r.FormValue("status")
-		inReplyToID := r.FormValue("in_reply_to_id")
-		if inReplyToID != "" {
-			replyToID, err := snowflake.Parse(inReplyToID)
-			if err != nil {
-				return httpx.Error(http.StatusBadRequest, err)
-			}
-			toot.InReplyToID = &replyToID
-		}
-		toot.Sensitive = r.FormValue("sensitive") == "true"
-		toot.SpoilerText = r.FormValue("spoiler_text")
-		toot.Visibility = r.FormValue("visibility")
-		toot.Language = r.FormValue("language")
-		scheduledAt := r.FormValue("scheduled_at")
-		if scheduledAt != "" {
-			t, err := time.Parse(time.RFC3339, scheduledAt)
-			if err != nil {
-				return httpx.Error(http.StatusBadRequest, err)
-			}
-			toot.ScheduledAt = &t
-		}
-	case "application/json":
-		if err := json.UnmarshalFull(r.Body, &toot); err != nil {
-			return httpx.Error(http.StatusBadRequest, err)
-		}
-	default:
-		buf, _ := httputil.DumpRequest(r, true)
-		fmt.Println(string(buf))
-		return httpx.Error(http.StatusUnsupportedMediaType, fmt.Errorf("unsupported media type"))
+	if err := httpx.Params(r, &toot); err != nil {
+		return err
 	}
-
-	actor := user.Actor
 
 	var parent models.Status
 	var conv *models.Conversation
 	if toot.InReplyToID != nil {
-		if err := env.DB.Take(&parent, *toot.InReplyToID).Error; err != nil {
+		if err := env.DB.Preload("Conversation").Take(&parent, *toot.InReplyToID).Error; err != nil {
 			return httpx.Error(http.StatusBadRequest, err)
 		}
-		conv, err = models.NewConversations(env.DB).FindOrCreate(parent.ConversationID, toot.Visibility)
-		if err != nil {
-			return err
-		}
+		conv = parent.Conversation
 	} else {
-		conv, err = models.NewConversations(env.DB).New(toot.Visibility)
-		if err != nil {
-			return err
+		conv = &models.Conversation{
+			Visibility: models.Visibility(toot.Visibility),
 		}
 	}
 
 	createdAt := time.Now()
 	id := snowflake.TimeToID(createdAt)
 	status := models.Status{
-		ID:             id,
-		UpdatedAt:      createdAt,
-		ActorID:        actor.ID,
-		Actor:          actor,
-		ConversationID: conv.ID,
+		ID:           id,
+		UpdatedAt:    createdAt,
+		Actor:        user.Actor,
+		Conversation: conv,
 		InReplyToID: func() *snowflake.ID {
 			if parent.ID != 0 {
 				return &parent.ID
@@ -107,7 +68,7 @@ func StatusesCreate(env *Env, w http.ResponseWriter, r *http.Request) error {
 				return nil
 			}
 		}(),
-		URI:         fmt.Sprintf("https://%s/users/%s/%d", actor.Domain, actor.Name, id),
+		URI:         fmt.Sprintf("https://%s/users/%s/%d", user.Actor.Domain, user.Actor.Name, id),
 		Sensitive:   toot.Sensitive,
 		SpoilerText: toot.SpoilerText,
 		Visibility:  models.Visibility(toot.Visibility),
@@ -329,7 +290,7 @@ func thread(id snowflake.ID, statuses []models.Status) ([]*models.Status, []*mod
 		ancestors = append(ancestors, l.status)
 		l = l.parent
 	}
-	reverse(ancestors)
+	algorithms.Reverse(ancestors)
 
 	var descendants []*models.Status
 	var walk func(*link)
@@ -341,10 +302,4 @@ func thread(id snowflake.ID, statuses []models.Status) ([]*models.Status, []*mod
 	}
 	walk(ids[id])
 	return ancestors, descendants
-}
-
-func reverse[T any](a []T) {
-	for i, j := 0, len(a)-1; i < j; i, j = i+1, j-1 {
-		a[i], a[j] = a[j], a[i]
-	}
 }

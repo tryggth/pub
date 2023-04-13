@@ -14,7 +14,7 @@ import (
 	"strings"
 
 	"github.com/davecheney/pub/internal/httpsig"
-	"github.com/davecheney/pub/internal/models"
+	"github.com/davecheney/pub/models"
 	"github.com/go-json-experiment/json"
 	"github.com/google/uuid"
 )
@@ -77,122 +77,135 @@ func (e *Error) Error() string {
 	return sb.String()
 }
 
-// Follow sends a follow request to the given URL.
-func (c *Client) Follow(follower, target string) error {
-	actor, err := c.Get(target)
+// Follow sends a follow request from the Account to the Target Actor's inbox.
+func Follow(ctx context.Context, follower *models.Account, target *models.Actor) error {
+	inbox := target.Inbox()
+	if inbox == "" {
+		return fmt.Errorf("no inbox found for %s", target.URI)
+	}
+	c, err := NewClient(ctx, follower)
 	if err != nil {
 		return err
 	}
-	inbox := stringFromAny(actor["sharedInbox"])
-	if inbox == "" {
-		inbox = stringFromAny(actor["inbox"])
-		if inbox == "" {
-			return fmt.Errorf("no inbox found for %s", target)
-		}
-	}
-
 	return c.Post(inbox, map[string]any{
 		"@context": "https://www.w3.org/ns/activitystreams",
 		"id":       uuid.New().String(),
 		"type":     "Follow",
-		"object":   target,
-		"actor":    follower,
+		"object":   target.URI,
+		"actor":    follower.Actor.URI,
 	})
 }
 
-// Unfollow sends an unfollow request to the given URL.
-func (c *Client) Unfollow(follower, target string) error {
-	actor, err := c.Get(target)
+// Unfollow sends an unfollow request from the Account to the Target Actor's inbox.
+func Unfollow(ctx context.Context, follower *models.Account, target *models.Actor) error {
+	inbox := target.Inbox()
+	if inbox == "" {
+		return fmt.Errorf("no inbox found for %s", target.URI)
+	}
+	c, err := NewClient(ctx, follower)
 	if err != nil {
 		return err
 	}
-	inbox := stringFromAny(actor["sharedInbox"])
-	if inbox == "" {
-		inbox = stringFromAny(actor["inbox"])
-		if inbox == "" {
-			return fmt.Errorf("no inbox found for %s", target)
-		}
-	}
-
 	return c.Post(inbox, map[string]any{
 		"@context": "https://www.w3.org/ns/activitystreams",
 		"id":       uuid.New().String(),
 		"type":     "Undo",
 		"object": map[string]any{
 			"type":   "Follow",
-			"object": target,
-			"actor":  follower,
+			"object": target.URI,
+			"actor":  follower.Actor.URI,
 		},
-		"actor": follower,
+		"actor": follower.Actor.URI,
 	})
 }
 
-// Like sends a like request to the given URL.
-func (c *Client) Like(liking, target string) error {
-	actor, err := c.Get(target)
+// Like sends a like request from the Account to the Statuses Actor's inbox.
+func Like(ctx context.Context, liker *models.Account, target *models.Status) error {
+	inbox := target.Actor.Inbox()
+	if inbox == "" {
+		return fmt.Errorf("no inbox found for %s", target.Actor.URI)
+	}
+	c, err := NewClient(ctx, liker)
 	if err != nil {
 		return err
 	}
-	inbox := stringFromAny(actor["sharedInbox"])
-	if inbox == "" {
-		inbox = stringFromAny(actor["inbox"])
-		if inbox == "" {
-			return fmt.Errorf("no inbox found for %s", target)
-		}
-	}
-
 	return c.Post(inbox, map[string]any{
 		"@context": "https://www.w3.org/ns/activitystreams",
 		"id":       uuid.New().String(),
 		"type":     "Like",
-		"object":   target,
-		"actor":    liking,
+		"object":   target.URI,
+		"actor":    liker.Actor.URI,
 	})
 }
 
-// Unlike sends an undo like request to the given URL.
-func (c *Client) Unlike(liking, target string) error {
-	actor, err := c.Get(target)
+// Unlike sends an undo like request from the Account to the Statuses Actor's inbox.
+func Unlike(ctx context.Context, liker *models.Account, target *models.Status) error {
+	inbox := target.Actor.Inbox()
+	if inbox == "" {
+		return fmt.Errorf("no inbox found for %s", target.Actor.URI)
+	}
+	c, err := NewClient(ctx, liker)
 	if err != nil {
 		return err
 	}
-	inbox := stringFromAny(actor["sharedInbox"])
-	if inbox == "" {
-		inbox = stringFromAny(actor["inbox"])
-		if inbox == "" {
-			return fmt.Errorf("no inbox found for %s", target)
-		}
-	}
-
 	return c.Post(inbox, map[string]any{
 		"@context": "https://www.w3.org/ns/activitystreams",
 		"id":       uuid.New().String(),
 		"type":     "Undo",
 		"object": map[string]any{
 			"type":   "Like",
-			"object": target,
-			"actor":  liking,
+			"object": target.URI,
+			"actor":  liker.Actor.URI,
 		},
-		"actor": liking,
+		"actor": liker.Actor.URI,
 	})
 }
 
-// Get fetches the ActivityPub resource at the given URL.
-func (c *Client) Get(uri string) (map[string]any, error) {
-	req, err := http.NewRequest("GET", uri, nil)
+// FetchActor fetches the Actor at the given URI.
+func FetchActor(ctx context.Context, signer *models.Account, uri string) (*Actor, error) {
+	c, err := NewClient(ctx, signer)
 	if err != nil {
 		return nil, err
+	}
+	var actor Actor
+	return &actor, c.Fetch(uri, &actor)
+}
+
+// FetchStatus fetches the Status at the given URI.
+func FetchStatus(ctx context.Context, signer *models.Account, uri string) (*Status, error) {
+	c, err := NewClient(ctx, signer)
+	if err != nil {
+		return nil, err
+	}
+	var status Status
+	return &status, c.Fetch(uri, &status)
+}
+
+// Fetch fetches the ActivityPub resource at the given URL and decodes it into the given object.
+func (c *Client) Fetch(uri string, obj interface{}) error {
+	req, err := http.NewRequestWithContext(c.ctx, "GET", uri, nil)
+	if err != nil {
+		return err
 	}
 	req.Header.Set("Accept", "application/activity+json, application/ld+json")
 	if err := httpsig.Sign(req, c.keyID, c.privateKey, nil); err != nil {
-		return nil, fmt.Errorf("failed to sign request: %w", err)
+		return fmt.Errorf("failed to sign request: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req.WithContext(c.ctx))
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		body, _ := io.ReadAll(resp.Body)
+		return &Error{
+			StatusCode: resp.StatusCode,
+			URI:        resp.Request.URL.String(),
+			Method:     resp.Request.Method,
+			Body:       string(body),
+		}
 	}
 	defer resp.Body.Close()
-	return c.bodyToObj(resp)
+	return json.UnmarshalFull(resp.Body, obj)
 }
 
 // Post posts the given ActivityPub object to the given URL.
@@ -224,28 +237,4 @@ func (c *Client) Post(url string, obj map[string]any) error {
 		}
 	}
 	return nil
-}
-
-// bodyToObj reads the body of the given response and returns the
-// ActivityPub object as a map[string]any.
-func (c *Client) bodyToObj(resp *http.Response) (map[string]any, error) {
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, &Error{
-			StatusCode: resp.StatusCode,
-			URI:        resp.Request.URL.String(),
-			Method:     resp.Request.Method,
-			Body:       string(body),
-		}
-	}
-	var obj map[string]any
-	if err := json.UnmarshalFull(resp.Body, &obj); err != nil {
-		return nil, err
-	}
-	return obj, nil
-}
-
-func stringFromAny(v any) string {
-	s, _ := v.(string)
-	return s
 }

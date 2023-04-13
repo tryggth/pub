@@ -2,7 +2,6 @@ package models
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/davecheney/pub/internal/snowflake"
 	"gorm.io/gorm"
@@ -24,16 +23,33 @@ type Relationship struct {
 
 // BeforeUpdate creates a relationship request between the actor and target.
 func (r *Relationship) BeforeUpdate(tx *gorm.DB) error {
+	return forEach(tx, r.updateRelationshipRequest)
+}
+
+// updateRelationshipRequest schedules a ActivityPub follow or unfollow request if
+// the actor has changed their relationship with the target.
+func (r *Relationship) updateRelationshipRequest(tx *gorm.DB) error {
 	var original Relationship
-	if err := tx.First(&original, "actor_id = ? and target_id = ?", r.ActorID, r.TargetID).Error; err != nil {
+	if err := tx.Preload("Actor").Take(&original, "actor_id = ? and target_id = ?", r.ActorID, r.TargetID).Error; err != nil {
 		return err
 	}
+	if original.Actor.IsRemote() {
+		// don't create a relationship request from a remote actors to local actors
+		return nil
+	}
+
 	fmt.Printf("relationship changed from %+v to %+v\n", original, r)
 
 	// if there is a conflict; eg. a follow then an unfollow before the follow is processed
 	// update the existing row to reflect the new action.
 	tx = tx.Clauses(clause.OnConflict{
-		UpdateAll: true,
+		Columns: []clause.Column{{Name: "actor_id"}, {Name: "target_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"action",
+			"created_at",
+			"updated_at",
+			"attempts", // resets the attempts counter
+		}),
 	})
 
 	// what changed?
@@ -84,12 +100,10 @@ func (r *Relationship) updateFollowingCount(tx *gorm.DB) error {
 // RelationshipRequests are created by hooks on the Relationship model, and are
 // processed by the RelationshipRequestProcessor in the background.
 type RelationshipRequest struct {
-	ID uint32 `gorm:"primarykey;"`
-	// CreatedAt is the time the request was created.
-	CreatedAt time.Time
-	// UpdatedAt is the time the request was last updated.
-	UpdatedAt time.Time
-	ActorID   snowflake.ID `gorm:"uniqueIndex:uidx_relationship_requests_actor_id_target_id;not null;"`
+	Request
+
+	// ActorID is the ID of the actor that is requesting the relationship change.
+	ActorID snowflake.ID `gorm:"uniqueIndex:uidx_relationship_requests_actor_id_target_id;not null;"`
 	// Actor is the actor that is requesting the relationship change.
 	Actor    *Actor       `gorm:"constraint:OnDelete:CASCADE;<-:false;"`
 	TargetID snowflake.ID `gorm:"uniqueIndex:uidx_relationship_requests_actor_id_target_id;not null;"`
@@ -97,12 +111,6 @@ type RelationshipRequest struct {
 	Target *Actor `gorm:"constraint:OnDelete:CASCADE;<-:false;"`
 	// Action is the action to perform, either follow or unfollow.
 	Action RelationshipRequestAction `gorm:"not null"`
-	// Attempts is the number of times the request has been attempted.
-	Attempts uint32 `gorm:"not null;default:0"`
-	// LastAttempt is the time the request was last attempted.
-	LastAttempt time.Time
-	// LastResult is the result of the last attempt if it failed.
-	LastResult string `gorm:"size:255;not null;default:''"`
 }
 
 type RelationshipRequestAction string
@@ -135,7 +143,7 @@ func (r *Relationships) Mute(actor, target *Actor) (*Relationship, error) {
 		return nil, err
 	}
 	forward.Muting = true
-	if err := r.db.Model(forward).Update("muting", true).Error; err != nil {
+	if err := r.db.Save(forward).Error; err != nil {
 		return nil, err
 	}
 	// there is no inverse relationship for muting
@@ -149,7 +157,7 @@ func (r *Relationships) Unmute(actor, target *Actor) (*Relationship, error) {
 		return nil, err
 	}
 	forward.Muting = false
-	if err := r.db.Model(forward).Update("muting", false).Error; err != nil {
+	if err := r.db.Save(forward).Error; err != nil {
 		return nil, err
 	}
 	// there is no inverse relationship for muting
@@ -163,11 +171,11 @@ func (r *Relationships) Block(actor, target *Actor) (*Relationship, error) {
 		return nil, err
 	}
 	forward.Blocking = true
-	if err := r.db.Model(forward).Update("blocking", true).Error; err != nil {
+	if err := r.db.Save(forward).Error; err != nil {
 		return nil, err
 	}
 	inverse.BlockedBy = true
-	if err := r.db.Model(inverse).Update("blocked_by", true).Error; err != nil {
+	if err := r.db.Save(inverse).Error; err != nil {
 		return nil, err
 	}
 	return forward, nil
@@ -180,11 +188,11 @@ func (r *Relationships) Unblock(actor, target *Actor) (*Relationship, error) {
 		return nil, err
 	}
 	forward.Blocking = false
-	if err := r.db.Model(forward).Update("blocking", false).Error; err != nil {
+	if err := r.db.Save(forward).Error; err != nil {
 		return nil, err
 	}
 	inverse.BlockedBy = false
-	if err := r.db.Model(inverse).Update("blocked_by", false).Error; err != nil {
+	if err := r.db.Save(inverse).Error; err != nil {
 		return nil, err
 	}
 	return forward, nil
@@ -196,15 +204,12 @@ func (r *Relationships) Follow(actor, target *Actor) (*Relationship, error) {
 	if err != nil {
 		return nil, err
 	}
-	// this magic is important, updating the local copy, then passing it to db.Model makes it
-	// available to the BeforeCreate hook. Then the hook can check how the relationship has changed
-	// compared to the previous state.
 	forward.Following = true
-	if err := r.db.Model(forward).Update("following", true).Error; err != nil {
+	if err := r.db.Save(forward).Error; err != nil {
 		return nil, err
 	}
 	inverse.FollowedBy = true
-	if err := r.db.Model(inverse).Update("followed_by", true).Error; err != nil {
+	if err := r.db.Save(inverse).Error; err != nil {
 		return nil, err
 	}
 	return forward, nil
@@ -217,11 +222,11 @@ func (r *Relationships) Unfollow(actor, target *Actor) (*Relationship, error) {
 		return nil, err
 	}
 	forward.Following = false
-	if err := r.db.Model(forward).Update("following", false).Error; err != nil {
+	if err := r.db.Save(forward).Error; err != nil {
 		return nil, err
 	}
 	inverse.FollowedBy = false
-	if err := r.db.Model(inverse).Update("followed_by", false).Error; err != nil {
+	if err := r.db.Save(inverse).Error; err != nil {
 		return nil, err
 	}
 	return forward, nil
@@ -241,10 +246,10 @@ func (r *Relationships) pair(actor, target *Actor) (*Relationship, *Relationship
 }
 
 func (r *Relationships) findOrCreate(actor, target *Actor) (*Relationship, error) {
-	var rel Relationship
-	if err := r.db.FirstOrCreate(&rel, Relationship{ActorID: actor.ID, TargetID: target.ID}).Error; err != nil {
-		return nil, err
+	rel := Relationship{
+		ActorID:  actor.ID,
+		TargetID: target.ID,
+		Target:   target,
 	}
-	rel.Target = target
-	return &rel, nil
+	return &rel, r.db.FirstOrCreate(&rel).Error
 }
